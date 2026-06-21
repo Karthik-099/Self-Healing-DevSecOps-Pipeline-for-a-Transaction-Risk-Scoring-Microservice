@@ -156,6 +156,13 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+paysentinel/.venv/
+
+# Test artefacts
+.pytest_cache/
+coverage.xml
+test-results/
+
 
 # Spyder project settings
 .spyderproject
