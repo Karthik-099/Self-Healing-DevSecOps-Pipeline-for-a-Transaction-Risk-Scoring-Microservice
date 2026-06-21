@@ -1,0 +1,25 @@
+-- Error Rate (last 5 minutes)
+index=paysentinel sourcetype=_json level=ERROR
+| timechart span=1m count as error_count
+
+-- P95 Latency
+index=paysentinel sourcetype=_json latency_ms=*
+| eventstats perc95(latency_ms) as p95_latency
+| table _time, transaction_id, latency_ms, p95_latency
+
+-- Flagged Transaction Rate
+index=paysentinel sourcetype=_json flagged=*
+| eval is_flagged=if(flagged=="true" OR flagged=true, 1, 0)
+| timechart span=5m sum(is_flagged) as flagged_count, count as total_count
+| eval flag_rate=round(flagged_count/total_count*100, 2)
+
+-- Risk Score Distribution
+index=paysentinel sourcetype=_json risk_score=*
+| bucket risk_score span=10
+| chart count by risk_score
+
+-- Alert: Error rate > 10 per minute over 5 min window
+index=paysentinel sourcetype=_json level=ERROR
+| bucket _time span=1m
+| stats count as error_count by _time
+| where error_count > 10

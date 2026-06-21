@@ -1,0 +1,139 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKERHUB_REPO   = "your-dockerhub-username/paysentinel"
+        IMAGE_TAG        = "${env.GIT_COMMIT[0..6]}"
+        IMAGE_FULL       = "${DOCKERHUB_REPO}:${IMAGE_TAG}"
+        SONAR_PROJECT    = "paysentinel"
+        KUBECONFIG_CRED  = "kubeconfig-eks"
+        DOCKERHUB_CRED   = "dockerhub-credentials"
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Setup Python') {
+            steps {
+                dir('paysentinel') {
+                    sh '''
+                        python3 -m venv .venv
+                        .venv/bin/pip install --quiet --upgrade pip
+                        .venv/bin/pip install --quiet -r app/requirements.txt
+                    '''
+                }
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                dir('paysentinel') {
+                    sh '.venv/bin/python -m pytest app/tests/ --cov=app --cov-report=xml:coverage.xml --cov-report=term-missing -q'
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'paysentinel/test-results/*.xml'
+                    publishCoverage adapters: [coberturaAdapter('paysentinel/coverage.xml')], sourceFileResolver: sourceFiles('NEVER_STORE')
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                dir('paysentinel') {
+                    withSonarQubeEnv('SonarQube') {
+                        sh '''
+                            sonar-scanner \
+                              -Dsonar.projectKey=${SONAR_PROJECT} \
+                              -Dsonar.sources=app \
+                              -Dsonar.tests=app/tests \
+                              -Dsonar.python.coverage.reportPaths=coverage.xml \
+                              -Dsonar.python.version=3.12
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('SonarQube Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                dir('paysentinel') {
+                    sh "docker build -t ${IMAGE_FULL} -t ${DOCKERHUB_REPO}:latest ."
+                }
+            }
+        }
+
+        stage('Trivy Image Scan') {
+            steps {
+                sh '''
+                    trivy image \
+                      --exit-code 1 \
+                      --severity HIGH,CRITICAL \
+                      --no-progress \
+                      --format table \
+                      ''' + "${IMAGE_FULL}"
+            }
+        }
+
+        stage('Push to Docker Hub') {
+            when { branch pattern: "main|release/.*", comparator: "REGEXP" }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: "${DOCKERHUB_CRED}",
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                        docker push ${IMAGE_FULL}
+                        docker push ${DOCKERHUB_REPO}:latest
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to EKS') {
+            when { branch pattern: "main|release/.*", comparator: "REGEXP" }
+            steps {
+                withCredentials([file(credentialsId: "${KUBECONFIG_CRED}", variable: 'KUBECONFIG')]) {
+                    sh '''
+                        sed -i "s|IMAGE_PLACEHOLDER|${IMAGE_FULL}|g" paysentinel/k8s/deployment.yaml
+                        kubectl apply -f paysentinel/k8s/deployment.yaml
+                        kubectl apply -f paysentinel/k8s/service.yaml
+                        kubectl apply -f paysentinel/k8s/hpa.yaml
+                        kubectl rollout status deployment/paysentinel --timeout=120s
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            echo "Pipeline failed on branch ${env.BRANCH_NAME} at stage ${env.STAGE_NAME}"
+        }
+        always {
+            sh 'docker rmi ${IMAGE_FULL} ${DOCKERHUB_REPO}:latest 2>/dev/null || true'
+            cleanWs()
+        }
+    }
+}

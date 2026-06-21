@@ -1,0 +1,61 @@
+services:
+  paysentinel:
+    build:
+      context: paysentinel
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - LOG_LEVEL=INFO
+    depends_on:
+      - splunk
+    networks:
+      - paysentinel-net
+
+  jenkins:
+    image: jenkins/jenkins:lts-jdk17
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - paysentinel-net
+
+  sonarqube:
+    image: sonarqube:10-community
+    ports:
+      - "9000:9000"
+    environment:
+      - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_logs:/opt/sonarqube/logs
+    networks:
+      - paysentinel-net
+
+  splunk:
+    image: splunk/splunk:9.2
+    ports:
+      - "8088:8088"
+      - "8089:8089"
+      - "5601:8000"
+    environment:
+      - SPLUNK_START_ARGS=--accept-license
+      - SPLUNK_PASSWORD=PaySentinel123!
+      - SPLUNK_HEC_TOKEN=paysentinel-hec-token-replace-me
+    volumes:
+      - splunk_data:/opt/splunk/var
+    networks:
+      - paysentinel-net
+
+volumes:
+  jenkins_home:
+  sonarqube_data:
+  sonarqube_logs:
+  splunk_data:
+
+networks:
+  paysentinel-net:
+    driver: bridge
