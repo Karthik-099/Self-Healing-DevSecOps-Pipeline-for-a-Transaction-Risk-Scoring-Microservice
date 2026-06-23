@@ -242,6 +242,64 @@ To wire the alert webhook to the rollback handler, set the alert action URL to t
 
 ---
 
+## Splunk Simulation / Replay (Local)
+
+To validate the end-to-end flow (transaction scoring -> log events -> saved-search conditions -> webhook payload -> rollback handler contract) without requiring a running Splunk instance, the repo includes a replay harness.
+
+### Files
+
+- `paysentinel/splunk_simulator/run_replay.py`: Generates realistic scoring traffic by calling `POST /score`, writes replay events to disk, and computes search results aligned with `paysentinel/splunk_queries.spl`.
+- `paysentinel/splunk_simulator/simulate_rollback_webhook.py`: Sends the generated webhook payload to a rollback handler endpoint.
+
+### Run
+
+1) Start the app locally:
+
+```bash
+cd paysentinel
+source .venv/bin/activate
+uvicorn app.main:app --reload --port 8000
+```
+
+2) Install replay dependencies (separately):
+
+```bash
+pip install -r paysentinel/splunk_simulator/requirements.txt
+```
+
+3) Execute replay with controlled error injection and velocity burst:
+
+```bash
+python3 paysentinel/splunk_simulator/run_replay.py \
+  --api-url http://localhost:8000 \
+  --out-dir ./splunk_simulator_output \
+  --transactions 250 \
+  --account-id acct-001 \
+  --emit-interval-ms 5 \
+  --inject-error-rate 0.04 \
+  --velocity-burst
+```
+
+Outputs:
+- `splunk_simulator_output/paysentinel-replay.log`: JSON replay events.
+- `splunk_simulator_output/search_results.json`: Evaluated metrics + `alert` block.
+- `splunk_simulator_output/alert_webhook_payload.json`: Webhook payload in the shape expected by `remediation/rollback_handler.py`.
+
+### Trigger webhook contract (optional)
+
+If your rollback handler is reachable over HTTP, send the payload:
+
+```bash
+python3 paysentinel/splunk_simulator/simulate_rollback_webhook.py \
+  --rollback-handler-url http://localhost:8081/webhook \
+  --payload ./splunk_simulator_output/alert_webhook_payload.json
+```
+
+If you run rollback handler locally as a script, you can load `alert_webhook_payload.json` and pass it as the `event` to `handle(event)`.
+
+---
+
+
 ## Self-Healing Rollback
 
 `remediation/rollback_handler.py` receives the Splunk alert webhook payload and:
